@@ -1,41 +1,54 @@
-SUBDIRS=address-controller configserv agent mqtt-gateway mqtt-lwt queue-scheduler router-agent router router-metrics subscription-service topic-forwarder none-authservice broker auth-controller auth-server
-CENTOS_SUBDIRS=base base-epel base-java base-nodejs
-RHEL_SUBDIRS= qpid-proton
-#
+TOPDIR=$(dir $(lastword $(MAKEFILE_LIST)))
+BUILD_DIRS     = agent none-authservice templates
+DOCKER_DIRS	   = topic-forwarder artemis address-controller standard-controller queue-scheduler keycloak-plugin keycloak-controller router router-metrics mqtt-gateway mqtt-lwt
+FULL_BUILD 	   = true
+DOCKER_REGISTRY ?= docker.io
+OPENSHIFT_PROJECT ?= $(shell oc project -q)
+OPENSHIFT_USER    ?= $(shell oc whoami)
+OPENSHIFT_TOKEN   ?= $(shell oc whoami -t)
+OPENSHIFT_MASTER  ?= $(shell oc whoami --show-server=true)
 
-all:
-	for dir in $(CENTOS_SUBDIRS) $(SUBDIRS); do \
-		$(MAKE) -C $$dir; \
-	done
+DOCKER_TARGETS = docker_build docker_tag docker_push clean
+BUILD_TARGETS  = init build test package $(DOCKER_TARGETS) coverage
+INSTALLDIR=$(CURDIR)/templates/install
 
-buildrhel:
-#	$(MAKE) -C $$dir build_rhel
-	for dir in $(SUBDIRS); do \
-		$(MAKE) build_rhel -C $$dir; \
-	done	
+all: init build test package docker_build
 
-pushall:
-	for dir in $(SUBDIRS); do \
-		$(MAKE) -C $$dir push; \
-	done
+build_java:
+	mvn -q test package -B $(MAVEN_ARGS)
 
-snapshotall:
-	for dir in $(SUBDIRS); do \
-		$(MAKE) -C $$dir snapshot; \
-	done
+clean_java:
+	mvn -B clean
 
-cleanall:
-	for dir in $(SUBDIRS); do \
-		$(MAKE) -C $$dir clean; \
-	done
+clean: clean_java
 
-copyartifactall:
-	for dir in $(SUBDIRS); do \
-		$(MAKE) -C $$dir copyartifact; \
-	done
+docker_build: build_java
 
-$(SUBDIRS):
-	$(MAKE) -C $@ $(MAKECMDGOALS)
-#	curl -s https://raw.githubusercontent.com/EnMasseProject/travis-scripts/master/trigger-travis.sh | bash /dev/stdin
+coverage: java_coverage
+	$(MAKE) FULL_BUILD=$(FULL_BUILD) -C $@ coverage
 
-.PHONY: all $(SUBDIRS) push snapshot clean pushall snapshotall cleanall
+java_coverage: build_amqp_module
+	mvn test -Pcoverage package -B $(MAVEN_ARGS)
+	mvn jacoco:report-aggregate
+
+$(BUILD_TARGETS): $(BUILD_DIRS)
+$(BUILD_DIRS):
+	$(MAKE) FULL_BUILD=$(FULL_BUILD) -C $@ $(MAKECMDGOALS)
+
+$(DOCKER_TARGETS): $(DOCKER_DIRS)
+$(DOCKER_DIRS):
+	$(MAKE) FULL_BUILD=$(FULL_BUILD) -C $@ $(MAKECMDGOALS)
+
+deploy:
+	./templates/install/deploy-openshift.sh -n $(OPENSHIFT_PROJECT) -u $(OPENSHIFT_USER) -m $(OPENSHIFT_MASTER) -o multitenant -a "standard none"
+
+systemtests:
+	OPENSHIFT_PROJECT=$(OPENSHIFT_PROJECT) OPENSHIFT_TOKEN=$(OPENSHIFT_TOKEN) OPENSHIFT_USER=$(OPENSHIFT_USER) OPENSHIFT_URL=$(OPENSHIFT_MASTER) OPENSHIFT_USE_TLS=true ./systemtests/scripts/run_tests.sh $(SYSTEMTEST_ARGS)
+
+client_install:
+	./systemtests/scripts/client_install.sh
+
+webdriver_install:
+	./systemtests/scripts/install_web_drivers.sh
+
+.PHONY: $(BUILD_TARGETS) $(DOCKER_TARGETS) $(BUILD_DIRS) $(DOCKER_DIRS) build_java deploy systemtests clean_java
